@@ -1,0 +1,710 @@
+---
+title: "Projekt z Eksploracji danych"
+subtitle: "Hotel Booking"
+author:
+- name: Bartłomiej Zub
+  affiliation: Politechnika Lubelska
+- name: Natalia Wilczek
+  affiliation: Politechnika Lubelska
+date: April,20 2023
+output:
+  rmdformats::downcute:
+    toc_depth: 4
+    highlight: espresso
+    theme: darkly
+    lightbox: false
+    self_contained: true
+    thumbnails: false
+    gallery: false
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = F,message = F)
+library(tidyverse)
+library(mosaic)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(e1071)
+library(ggcorrplot)
+library(mice)
+```
+
+## Cel projektu
+
+Celem projektu jest przewidzenie ilości anulowanych rezerwacji w hotelach.
+
+![](hotel.jpg){width="600"}
+
+#### Opis danych
+
+Dane zostały pobrane ze strony [Kaggle](https://www.kaggle.com/) oraz zawierają informacje o rezerwacji hotelu miejskiego i hotelu wypoczynkowego oraz informacje takie jak data dokonania rezerwacji, długość pobytu, liczba osób dorosłych, dzieci i/lub niemowląt oraz liczba dostępnych miejsc parkingowych.
+
+Dane pochodzą z artykułu Hotel Booking Demand Datasets, napisanego przez Nuno Antonio, Ana Almeida i Luis Nunes dla Data in Brief, tom 22, luty 2019 r.
+
+Poniżej zostały przedstawione pierwsze kilka nazw zmiennych.
+
+| Nazwa zmiennej           | Opis                                                                                    |
+|--------------------------|-----------------------------------------------------------------------------------------|
+| **`hotel`**              | Nazwa hotelu                                                                            |
+| **`is_cancelled`**       | Wartość wskazująca czy rezerwacja została anulowana (1) czy nie (0)                     |
+| **`lead_time`**          | Ilość dni, które upłynęły pomiędzy datą wprowadzenia rezerwacji do PMS a datą przyjazdu |
+| **`arrival_date_year`**  | Rok daty przyjazdu                                                                      |
+| **`arrival_date_month`** | Miesiąc daty przyjazdu                                                                  |
+| **`arrival_date_week`**  | Numer tygodnia roku dla daty przyjazdu                                                  |
+
+: Nazwy pierwszych 6 zmiennych
+
+#### Wczytanie danych
+
+```{r}
+
+bookings <- read.csv('hotel_bookings.csv', header = T)
+
+DT::datatable(head(bookings,30), extensions = c('Responsive'))
+```
+
+#### Wstępne przetworzenie danych
+
+```{r}
+
+
+bookings <- bookings %>% 
+  mutate(is_canceled = as.factor(is_canceled))
+
+bookings[sapply(bookings, is.character)] <- lapply(bookings[sapply(bookings, is.character)], as.factor)
+
+str(bookings)
+```
+
+#### Sprawdzenie braków danych
+
+```{r}
+library(DataExplorer)
+
+plot_missing(bookings)
+```
+
+W kolumnie `children` znajdują się 4 wiersze z brakującymi wartościami.
+
+#### Imputacja danych
+
+```{r}
+
+n <- length(bookings$children)
+for(i in 1:n){
+  if(is.na(bookings$children[i]))
+    bookings$children[i] <- bookings$babies[i]
+}
+
+# moda dla brakujacych danych
+
+mode <- function(v){
+  unique1 <- unique(v)
+  unique1[which.max(tabulate(match(v,unique1)))]
+}
+
+bookings$meal <- replace(bookings$meal, bookings$meal == "Undefined", 'SC')
+
+
+bookings$meal <- factor(bookings$meal)
+
+modeM <- mode(bookings$market_segment)
+
+
+#Replacing Undefined with mode
+bookings$market_segment <- replace(bookings$market_segment,bookings$market_segment=='Undefined',modeM)
+
+#Making the Column as a factor
+bookings$market_segment <- factor(bookings$market_segment)
+
+#Checking unique values in market_segment
+unique(bookings$market_segment)
+
+#Function to calculate mode
+modeD <- mode(bookings$distribution_channel)
+#Replacing Undefined with mode
+bookings$distribution_channel <- replace(bookings$distribution_channel,bookings$distribution_channel=='Undefined',modeD)
+
+#Making the Column as a factor
+bookings$distribution_channel <- factor(bookings$distribution_channel)
+
+#Checking unique values in distribution_channel
+unique(bookings$distribution_channel)
+
+#checking missing values in quantitative columns
+sapply(bookings, function(x) sum(is.na(x)))
+       
+#Plot missing values in dataset
+plot_missing(bookings)
+```
+
+Brakujące wartości zostały pomyślnie przypisane.
+
+#### Wyznaczenie podstawowych statystyk
+
+```{r}
+
+library(psych)
+
+describe(bookings)
+```
+
+## EDA
+
+```{r}
+
+table(bookings$hotel)
+```
+
+Poniższy wykres pokazuje, że liczba rezerwacji w hotelu City wynosi 79330, a w hotelu wypoczynkowym 40060
+
+```{r}
+
+ggplot(bookings,aes(x=factor(hotel)))+
+  geom_bar(col ="black",fill="#734c2e",alpha=0.5)+
+  theme(axis.text.x = element_text(face="bold", size=15),axis.text.y = element_text(face="bold", size=15))+
+  scale_x_discrete("Liczba rezerwacji")+
+  scale_y_continuous("Liczba")
+
+```
+
+```{r}
+
+library(scales)
+
+
+ggplot(data = bookings, aes(x = hotel, y = prop.table(stat(count)), fill = factor(is_canceled),
+                            label = percent(prop.table(stat(count)))))+
+  geom_bar(position = position_dodge())+
+  theme(axis.text.x = element_text(face = 'bold', size = 12), axis.text.y = element_text(face = 'bold',size = 12))+
+  scale_y_continuous(labels = percent)+
+  labs(title = 'Procent anulacji według rodzaju hotelu', x = 'Typ hotelu', y ='Liczba')+
+  scale_fill_manual(
+    name = "Status bookingu",
+    breaks = c("0",'1'),
+    labels = c("nieanulowany","anulowany"),
+    values = c('0'= '#03541c', '1' = '#541605')
+  )+
+  geom_text(stat = "count", position = position_dodge(.9), vjust = -0.5, size =7)
+  
+```
+
+Można zauważyć, że przy dokonywaniu rezerwacji jest mniej odwołań w hotelu wypoczynkowym.
+
+```{r}
+
+ggplot(bookings, aes(x = hotel, y=lead_time, fill = factor(is_canceled)))+
+  geom_boxplot(position = position_dodge())+
+  labs( title = "Anulowanie według rodzaju hotelu na podstawie czasu realizacji",
+        x = "Typ hotelu",
+        y = "Czas realizacji (Dni) ")+
+  theme(axis.text.x = element_text(face="bold", size=15),axis.text.y = element_text(face="bold", size=15))+
+  scale_fill_manual(
+    name = "Status bookingu",
+    breaks = c("0",'1'),
+    labels = c("nieanulowany","anulowany"),
+    values = c('0'= '#d6427e', '1' = '#3d041b')
+    
+  )
+
+```
+
+Wykres przedstawia anulowanie zamówienia według typu hotelu ( `hotel`) na podstawie czasu realizacji ( `lead_time`). Czas realizacji to odstęp czasowy między datą rezerwacji a rzeczywistą datą zameldowania. Możemy zauważyć, że osoby, które dokonują rezerwacji bardzo wcześnie, prawdopodobnie anulują rezerwację.
+
+```{r}
+
+bookings$arrival_date_month <- factor(bookings$arrival_date_month, levels = month.name)
+
+
+ggplot(bookings, aes(x = arrival_date_month))+
+  geom_bar(fill = '#c9ad73')+
+  geom_text(stat = 'count', aes(label = ..count..), hjust = 1, size = 9)+
+  coord_flip()+
+  labs(title = "Miesięczna prośba o rezerwację",
+       x = 'Miesiąc',
+       y = 'Liczba')+
+  theme(axis.text.x = element_text(face="bold", size=15),axis.text.y = element_text(face="bold", size=15))
+
+```
+
+Powyższy wykres przedstawia liczbę rezerwacji dokonywanych w danym miesiącu w obu hotelach. Możemy z łatwością zauważyć, iż **lipiec** i **sierpień** to najbardziej zalegane miesiące, jeśli chodzi o rezerwacje.
+
+```{r}
+
+ggplot(bookings,aes(arrival_date_month, fill = factor(is_canceled)))+
+  geom_bar()+
+  geom_text(stat = "count", aes(label = ..count..), hjust = 0.9,size= 6)+
+  coord_flip()+
+  scale_fill_manual(
+    name = "Status bookingu",
+    breaks = c("0", "1"),
+    label = c("nieanulowany", "anulowany"),
+    values = c("#e3cfa3", '#593f06')
+  )+
+  labs(title = 'Status bookingu według miesiąca',
+       x = "Miesiąc",
+       y = 'Liczba')+
+  theme(axis.text.x = element_text(face="bold", size=12),axis.text.y = element_text(face="bold", size=12))
+
+
+```
+
+Na powyższym wykresie możemy się dowiedzieć ile rezerwacji i odwołań dokonano miesięcznie w obu hotelach, analogicznie do poprzedniego wykresu, **lipiec** i **sierpień** to miesiące z największą liczbą odwołań.
+
+```{r}
+
+ggplot(bookings, aes(factor(distribution_channel), fill = factor(is_canceled)))+
+  geom_bar()+
+  theme(axis.text.x = element_text(face="bold", size=12),axis.text.y = element_text(face="bold", size=12))+
+  labs(title = "Anulowanie na podstawie rodzaju dystrybucji",
+       x = 'Typ dystrybucji',
+       y = 'Liczba rezerwacji')+
+  scale_fill_manual(
+    name = "Status bookingu",
+    breaks = c("0", "1"),
+    label = c("nieanulowany", "anulowany"),
+    values = c("#a1d1a2", '#012401')
+  )
+
+
+```
+
+Wykres próbuje rozszyfrować wzorzec rezerwacji i anulowania w oparciu o kanał dystrybucji ( `distribution_channel`). Najwiecej rezerwowano i anulowano pokoje rezerwowane za pośrednictwem biur podróży.
+
+## Macierz korelacji
+
+```{r}
+
+df <- bookings %>% mutate_if(is.factor,as.numeric)
+
+col <- colorRampPalette(c("#3b1601", "#a35327", "#FFFFFF", "#bfa747", "#808000"))
+
+
+corrplot::corrplot(cor(df),method = 'color', col = col(200),
+                   type = 'upper', order = 'hclust',
+                   addCoef.col = "black", tl.col = "black", tl.srt = 10,
+                   diag = F, tl.cex = 0.5,number.cex = 0.5)
+
+
+```
+
+## Budowa modeli
+
+```{r}
+# dodanie dwoch nowych kolumn do oznaczenia calkowitej liczby noclegow i calkowitego kosztu
+# Koszt calkowity = Srednia stawka dzienna (adr) * calkowita liczba noclegow
+
+bookings1 <- data.frame(bookings)
+
+bookings1 <- bookings1 %>% 
+  mutate(stay_nights_total = stays_in_weekend_nights+stays_in_week_nights,
+         stay_cost_total = adr*stay_nights_total)
+
+
+
+```
+
+### Podział danych na zbiór treningowy i testowy
+
+```{r}
+
+set.seed(2023)
+
+ind <- createDataPartition(bookings1$is_canceled, p = 0.7)
+data.ucz <- bookings1[ind$Resample1,]
+data.test <- bookings1[-ind$Resample1,]
+
+data.ucz.features <- data.ucz[c('hotel','is_canceled','lead_time','adults','children','babies','meal',
+                         'market_segment','distribution_channel','is_repeated_guest',
+                         'previous_cancellations','previous_bookings_not_canceled','reserved_room_type',
+                         'deposit_type','days_in_waiting_list','customer_type','adr',
+                         'required_car_parking_spaces','stay_nights_total','stay_cost_total')]
+
+```
+
+Za kontrolę uczenia maszynowego w modelach będzie odpowiadać `10-krotna walidacja krzyżowa`.
+
+```{r}
+
+control <- trainControl(method = 'cv', number = 10)
+
+```
+
+### Model **`drzewa decyzyjnego`**
+
+**Drzewo decyzyjne** - jest strukturą hierarchiczną przedstawiającą model klasyfikacyjny lub regresyjny. Stosowane są szczególnie często wówczas, gdy funkcyjna postać związku pomiędzy predyktorami a zmienną wynikową jest nieznana lub ciężka do ustalenia. Każde drzewo decyzyjne składa się z korzenia (ang. root), węzłów (ang. nodes) i liści (ang. leaves). Korzeniem nazywamy początkowy węzeł drzewa, z którego poprzez podziały (ang. splits) powstają kolejne węzły potomne. Końcowe węzły, które nie podlegają podziałom nazywamy liśćmi, a linie łączące węzły nazywamy gałęziami (ang. branches).
+
+Jeśli drzewo służy do zadań klasyfikacyjnych, to liście zawierają informację o tym, która klasa w danym ciągu podziałów jest najbardziej prawdopodobna. Natomiast, jeśli drzewo jest regresyjne, to liście zawierają warunkowe miary tendencji centralnej (najczęściej średnią) wartości zmiennej wynikowej. Warunek stanowi szereg podziałów doprowadzający do danego węzła terminalnego (liścia). W obu przypadkach (klasyfikacji i regresji) drzewo "dąży" do takiego podziału by kolejne węzły, a co za tym idzie również liście, były ja najbardziej jednorodne ze względu na zmienną wynikową.
+
+**Algorytm budowy drzewa:**
+
+1.  stwórz początkowy węzeł (korzeń) i oznacz go jako otwarty;
+2.  przypisz wszystkie możliwe rekordy do węzła początkowego;
+3.  **dopóki** istnieją otwarte węzły **wykonuj**: • wybierz węzeł **n**, wyznacz potrzebne statystyki opisowe zmiennej zależnej dla tego węzła i przypisz wartość docelową; • **jeśli** kryterium zatrzymania podziału jest spełnione dla węzła n, **to** oznacz go za **zamknięty**; • **w przeciwnym przypadku** wybierz podział r elementów węzła n, i dla każdego podzbioru podziału stwórz węzeł niższego rzędu (potomka) n*r* oraz oznacz go jako otwarty; • następnie przypisz wszystkie przypadki generowane podziałem r do odpowiednich węzłów potomków n*r*; • oznacza węzeł n jako zamknięty.
+
+```{r}
+
+model.rpart <- train(is_canceled~.,data = data.ucz.features, method = "rpart", trControl = control)
+
+
+```
+
+```{r}
+
+pred.rpart <- predict(model.rpart, data.test, type = 'prob')
+
+pred.rpart.class <- predict(model.rpart,data.test)
+
+
+x <- confusionMatrix(pred.rpart.class, data.test$is_canceled, positive = '1')
+x
+```
+
+Interpretacja:
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 0: 22480
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 1: 8256
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 0: 69
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 1: 5011
+
+Statystyki:
+
+-   Accuracy (Dokładność): Model osiągnął dokładność na poziomie 0.7676, co oznacza, że około 77% przewidywań było poprawnych.
+
+-   Kappa: Wartość współczynnika Kappa wynosi 0.4292, co wskazuje na umiarkowaną zgodność między przewidywaniami modelu a prawdziwymi etykietami. Wartości Kappa w przedziale od 0,4 do 0,6 sugerują umiarkowaną zgodność.
+
+-   Sensitivity (Czułość): Czułość modelu wynosi 0.3777, co oznacza, że około 38% przypadków należących do klasy 1 zostało poprawnie przewidzianych. Czułość jest istotna, gdy istnieje potrzeba skutecznej identyfikacji przypadków klasy 1.
+
+-   Specificity (Specyficzność): Specyficzność wynosi 0.9969, co oznacza, że model poprawnie przewidział około 99% przypadków należących do klasy 0. Wysoka wartość specyficzności jest istotna, gdy istnieje potrzeba dokładnego rozpoznania przypadków klasy 0.
+
+-   Pos Pred Value (Pozytywna wartość predykcyjna): Wartość pozytywnej wartości predykcyjnej wynosi 0.9864, co oznacza, że około 99% przypadków przewidzianych jako pozytywne jest rzeczywiście pozytywnych. Jest to istotne przy ocenie skuteczności modelu w przewidywaniu prawdziwych przypadków klasy 1.
+
+-   Neg Pred Value (Negatywna wartość predykcyjna): Wartość negatywnej wartości predykcyjnej wynosi 0.7314, co oznacza, że około 73% przypadków przewidzianych jako negatywne jest rzeczywiście negatywnych. Jest to istotne przy ocenie zdolności modelu do prawidłowego wykluczania przypadków klasy 1.
+
+-   Balanced Accuracy (Zbalansowana dokładność): Zbalansowana dokładność wynosi 0.6873, co jest średnią z czułości i specyficzności. Wartość ta wskazuje na ogólną skuteczność modelu w klasyfikacji obserwacji z obu klas.
+
+Podsumowując, wyniki modelu drzewa decyzyjnego na tym zbiorze danych sugerują umiarkowaną skuteczność w przewidywaniu rezerwacji hotelowych. Model osiągnął wysoką specyficzność, ale niską czułość. Istnieje pole do dalszej optymalizacji modelu w celu poprawy czułości i ogólnej skuteczności.
+
+### Model **`RandomForest`**
+
+**Lasy losowe** - są uogólnieniem metody `bagging`, polegającą na losowaniu dla każdego drzewa wchodzącego w skład lasu m predyktorów spośród p dostępnych, a następnie budowaniu drzew z wykorzystaniem tylko tych predyktorów *(Ho 1995)*. Dzięki temu za każdy razem drzewo jest budowane w oparciu o nowy zestaw cech *(najczęściej przyjmujemy m =√p)*. W przypadku modeli bagging za każdym razem najsilniejszy predyktor wchodził w skład zbioru uczącego, a co za tym idzie również uczestniczył w tworzeniu reguł podziału. Wówczas wiele drzew zawierało reguły stosujące dany atrybut, a wtedy predykcje otrzymywane za pomocą drzew były skorelowane. Dlatego nawet duża liczba prób bootstrapowych nie zapewniała poprawy precyzji. Implementacja tej metody znajduje się w pakiecie `randomForest`.
+
+```{r}
+
+model_rf <- randomForest::randomForest(is_canceled~.,data = data.ucz.features,
+                                       ntree = 500,
+                                       cutoff = c(0.5,0.5),
+                                       mtry =2,
+                                       importance =T)
+
+
+```
+
+```{r}
+
+pred.rf <- predict(model_rf,data.test, type = 'prob')
+pred.rf.class <- predict(model_rf, data.test)
+
+
+```
+
+```{r}
+
+x2 <- confusionMatrix(pred.rf.class, data.test$is_canceled, positive = '1')
+x2
+
+```
+
+Interpretacja:
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 0: 22305
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 1: 7540
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 0: 244
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 1: 5727
+
+Statystyki:
+
+-   Accuracy (Dokładność): Model osiągnął dokładność na poziomie 0.7827, co oznacza, że około 78% przewidywań było poprawnych.
+
+-   Kappa: Wartość współczynnika Kappa wynosi 0.4746, co wskazuje na umiarkowaną zgodność między przewidywaniami modelu a prawdziwymi etykietami. Wartości Kappa w przedziale od 0,4 do 0,6 sugerują umiarkowaną zgodność.
+
+-   Sensitivity (Czułość): Czułość modelu wynosi 0.4317, co oznacza, że około 43% przypadków należących do klasy 1 zostało poprawnie przewidzianych. Czułość jest istotna, gdy istnieje potrzeba skutecznej identyfikacji przypadków klasy 1.
+
+-   Specificity (Specyficzność): Specyficzność wynosi 0.9892, co oznacza, że model poprawnie przewidział około 99% przypadków należących do klasy 0. Wysoka wartość specyficzności jest istotna, gdy istnieje potrzeba dokładnego rozpoznania przypadków klasy 0.
+
+-   Pos Pred Value (Pozytywna wartość predykcyjna): Wartość pozytywnej wartości predykcyjnej wynosi 0.9591, co oznacza, że około 96% przypadków przewidzianych jako pozytywne jest rzeczywiście pozytywnych. Jest to istotne przy ocenie skuteczności modelu w przewidywaniu prawdziwych przypadków klasy 1.
+
+-   Neg Pred Value (Negatywna wartość predykcyjna): Wartość negatywnej wartości predykcyjnej wynosi 0.7474, co oznacza, że około 75% przypadków przewidzianych jako negatywne jest rzeczywiście negatywnych. Jest to istotne przy ocenie zdolności modelu do prawidłowego wykluczania przypadków klasy 1.
+
+-   Balanced Accuracy (Zbalansowana dokładność): Zbalansowana dokładność wynosi 0.7104, co jest średnią z czułości i specyficzności. Wartość ta wskazuje na ogólną skuteczność modelu w klasyfikacji obserwacji z obu klas.
+
+Podsumowując, wyniki modelu lasu losowego na tym zbiorze danych sugerują umiarkowaną skuteczność w przewidywaniu rezerwacji hotelowych. Model osiągnął dość wysoką dokładność i specyficzność, ale niską czułość. Istnieje pole do dalszej optymalizacji modelu w celu poprawy czułości i ogólnej skuteczności.
+
+### Model **`kNN`**
+
+**Metoda k najbliższych sąsiadów** Technika k najbliższych sąsiadów *(ang. k-Nearest Neighbors)* przewiduje wartość zmiennej wynikowej na podstawie k najbliższych obserwacji zbioru uczącego. W przeciwieństwie do wspomnianych wcześniej modeli liniowych, nie posiada ona jawnej formy i należy do klasy technik nazywanych czarnymi skrzynkami *(ang. black box)*. Może być wykorzystywana, zarówno do zadań **klasyfikacyjnych, jak i regresyjnych**. W obu przypadkach predykcja dla nowych wartości predyktorów przebiega podobnie. Niech x0 będzie obserwacją, dla której poszukujemy wartości zmiennej wynikowej y0. Na podstawie zbioru obserwacji x ∈ T zbioru uczącego wyznacza się k najbliższych sąsiadów , gdzie k jest z góry ustaloną wartością. Następnie, jeśli zadanie ma charakter klasyfikacyjny, to y0 przypisuje się modę zmiennej wynikowej obserwacji będących k najbliższymi sąsiadami. W przypadku zadań regresyjnych y0 przypisuje się średnią lub medianę. Olbrzymie znaczenie dla wyników predykcji na podstawie metody **kNN** ma dobór metryki. Nie istnieje obiektywna technika wyboru najlepszej metryki, dlatego jej doboru dokonujemy metodą prób i błędów. Należy dodatkowo pamiętać, że wielkości mierzone x mogą się różnić zakresami zmienności, a co za tym idzie, mogą znacząco wpłynąć na mierzone odległości pomiędzy punktami. Dlatego zaleca się standaryzację zmiennych przed zastosowaniem metody **kNN**. Kolejnym parametrem, który ma znaczący wpływ na predykcję, jest liczba sąsiadów k. Wybór zbyt małej liczby k może doprowadzić do przeuczenia modelu. Z kolei zbyt duża liczba sąsiadów powoduje obciążenie wyników. Dopiero dobór odpowiedniego k daje model o stosunkowo niskiej wariancji i obciążeniu. Najczęściej liczby k poszukujemy za pomocą próbkowania.
+
+```{r}
+
+model.knn <- train(is_canceled~.,data = data.ucz.features, method = 'knn', trControl = control)
+
+pred.knn <- predict(model.knn, data.test, type = 'prob')
+pred.knn.class <- predict(model.knn,data.test)
+
+```
+
+```{r}
+
+x3 <- confusionMatrix(pred.knn.class,data.test$is_canceled,positive = '1')
+
+x3
+
+```
+
+Interpretacja:
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 0: 18861
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 1: 5233
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 0: 3688
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 1: 8034
+
+Statystyki:
+
+-   Accuracy (Dokładność): Model osiągnął dokładność na poziomie 0.7509, co oznacza, że około 75% przewidywań było poprawnych.
+
+-   Kappa: Wartość współczynnika Kappa wynosi 0.4529, co wskazuje na umiarkowaną zgodność między przewidywaniami modelu a prawdziwymi etykietami. Wartości Kappa w przedziale od 0,4 do 0,6 sugerują umiarkowaną zgodność.
+
+-   Sensitivity (Czułość): Czułość modelu wynosi 0.6056, co oznacza, że około 61% przypadków należących do klasy 1 zostało poprawnie przewidzianych. Czułość jest istotna, gdy istnieje potrzeba skutecznej identyfikacji przypadków klasy 1.
+
+-   Specificity (Specyficzność): Specyficzność wynosi 0.8364, co oznacza, że model poprawnie przewidział około 84% przypadków należących do klasy 0. Wysoka wartość specyficzności jest istotna, gdy istnieje potrzeba dokładnego rozpoznania przypadków klasy 0.
+
+-   Pos Pred Value (Pozytywna wartość predykcyjna): Wartość pozytywnej wartości predykcyjnej wynosi 0.6854, co oznacza, że około 69% przypadków przewidzianych jako pozytywne jest rzeczywiście pozytywnych. Jest to istotne przy ocenie skuteczności modelu w przewidywaniu prawdziwych przypadków klasy 1.
+
+-   Neg Pred Value (Negatywna wartość predykcyjna): Wartość negatywnej wartości predykcyjnej wynosi 0.7828, co oznacza, że około 78% przypadków przewidzianych jako negatywne jest rzeczywiście negatywnych. Jest to istotne przy ocenie zdolności modelu do prawidłowego wykluczania przypadków klasy 1.
+
+Podsumowując, model kNN osiągnął umiarkowaną dokładność i zgodność, jednak wartości czułości i specyficzności są niższe w porównaniu do modelu XGBoost. Istnieje również miejsce do dalszej optymalizacji i doskonalenia modelu w celu poprawy wyników predykcji rezerwacji hotelowych.
+
+### Model **`XGBOOST`**
+
+**Model XGBoost** *(eXtreme Gradient Boosting)* jest zaawansowanym algorytmem uczenia maszynowego wykorzystywanym w statystyce do rozwiązywania problemów **klasyfikacji i regresji**. Jest to złożony model zespołowy oparty na technice wzmacniania gradientowego.
+
+**XGBoost** jest oparty na technologii drzew decyzyjnych, która polega na budowaniu drzewa dla każdej zmiennej niezależnej. Główną cechą wyróżniającą **XGBoost** jest wykorzystanie techniki wzmacniania gradientowego, która polega na sekwencyjnym tworzeniu słabych modeli i dodawaniu ich do złożonego modelu w celu poprawy predykcyjnej mocy.
+
+Algorytm **XGBoost** skupia się na minimalizacji funkcji kosztu poprzez optymalizację gradientu. Wykorzystuje gradientowy spadek, aby aktualizować parametry modelu w sposób iteracyjny, minimalizując funkcję straty. Ponadto, XGBoost wprowadza dodatkowe techniki regularyzacji, takie jak ograniczenia na głębokość drzew, regularyzację *L1 i L2*, co pomaga w zarządzaniu nadmiernym dopasowaniem modelu.
+
+Model **XGBoost** oferuje wiele zalet, takich jak doskonała wydajność predykcyjna, elastyczność w obsłudze różnych typów danych, automatyczna obsługa brakujących wartości, możliwość uwzględnienia ważności cech i obsługa nieliniowych zależności. Dodatkowo, XGBoost obsługuje zarówno problemy klasyfikacji, jak i regresji, umożliwiając zastosowanie go w różnorodnych scenariuszach statystycznych.
+
+W skrócie, model XGBoost w statystyce to zaawansowany algorytm uczenia maszynowego, który wykorzystuje techniki wzmacniania gradientowego i drzew decyzyjnych do rozwiązywania problemów klasyfikacji i regresji.
+
+```{r}
+
+model.xgboost <- train(is_canceled~.,data = data.ucz.features, method = 'xgbLinear', trControl = control)
+
+pred.xgboost <- predict(model.xgboost, data.test, type = 'prob')
+pred.xgboost.class <- predict(model.xgboost, data.test)
+
+x4 <- confusionMatrix(pred.xgboost.class, data.test$is_canceled, positive = '1')
+
+x4
+```
+
+nterpretacja:
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 0: 20715
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 1: 4986
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 0: 1834
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 1: 8281
+
+Statystyki:
+
+-   Accuracy (Dokładność): Model osiągnął dokładność na poziomie 0.8096, co oznacza, że około 81% przewidywań było poprawnych. Jest to wyższa dokładność niż w przypadku modelu Bayesa i SVM.
+
+-   Kappa: Wartość współczynnika Kappa wynosi 0.5708, co wskazuje na umiarkowaną zgodność między przewidywaniami modelu a prawdziwymi etykietami. Wartości Kappa w przedziale od 0,4 do 0,6 sugerują umiarkowaną zgodność.
+
+-   Sensitivity (Czułość): Czułość modelu wynosi 0.6242, co oznacza, że około 62% przypadków należących do klasy 1 zostało poprawnie przewidzianych. Czułość jest istotna, gdy istnieje potrzeba skutecznej identyfikacji przypadków klasy 1.
+
+-   Specificity (Specyficzność): Specyficzność wynosi 0.9187, co oznacza, że model poprawnie przewidział około 92% przypadków należących do klasy 0. Wysoka wartość specyficzności jest istotna, gdy istnieje potrzeba dokładnego rozpoznania przypadków klasy 0.
+
+-   Pos Pred Value (Pozytywna wartość predykcyjna): Wartość pozytywnej wartości predykcyjnej wynosi 0.8187, co oznacza, że około 82% przypadków przewidzianych jako pozytywne jest rzeczywiście pozytywnych. Jest to istotne przy ocenie skuteczności modelu w przewidywaniu prawdziwych przypadków klasy 1.
+
+-   Neg Pred Value (Negatywna wartość predykcyjna): Wartość negatywnej wartości predykcyjnej wynosi 0.8060, co oznacza, że około 81% przypadków przewidzianych jako negatywne jest rzeczywiście negatywnych. Jest to istotne przy ocenie zdolności modelu do prawidłowego wykluczania przypadków klasy 1.
+
+-   Balanced Accuracy (Zbalansowana dokładność): Zbalansowana dokładność wynosi 0.7714, co jest średnią z czułości i specyficzności. Wartość ta wskazuje na ogólną skuteczność modelu w klasyfikacji obserwacji z obu klas.
+
+Podsumowując, wyniki modelu XGBoost na tym zbiorze danych sugerują lepszą skuteczność w przewidywaniu rezerwacji hotelowych w porównaniu do modeli Bayesa i SVM. Model XGBoost osiągnął wyższą dokładność, wyższą czułość i specyficzność, a także wyższą pozytywną wartość predykcyjną. Jednak istnieje nadal pole do dalszej optymalizacji i doskonalenia modelu w celu uzyskania jeszcze lepszych wyników.
+
+### Model `SVM`
+
+**Model SVM** *(Support Vector Machine)* jest jednym z algorytmów używanych w statystyce do rozwiązywania problemów klasyfikacji i regresji. Jest to metoda nienadzorowana, która tworzy hiperpłaszczyznę lub zbiór hiperpłaszczyzn w przestrzeni wielowymiarowej, które oddzielają dane należące do różnych klas.
+
+Definicja **modelu SVM** można przedstawić w kontekście problemu klasyfikacji. Mając dane treningowe, w których każda próbka jest opisana przez zestaw cech, SVM ma za zadanie znaleźć optymalne hiperpłaszcze lub zbiór hiperpłaszczyzn, które najlepiej rozdzielają próbki należące do różnych klas. Optymalność jest osiągana poprzez maksymalizację marginesu, czyli minimalizację odległości między hiperpłaszczyzną a najbliższymi punktami danych, nazywanymi wektorami nośnymi (support vectors).
+
+**Model SVM** posiada zdolność do radzenia sobie zarówno z liniowo separowalnymi danymi, jak i z danymi nieliniowymi. Dzięki wykorzystaniu techniki kerneli, SVM może przekształcić dane wejściowe do przestrzeni o wyższej wymiarowości, w której dane mogą stać się liniowo separowalne. Popularnymi kernelami stosowanymi w SVM są kernel liniowy, wielomianowy i radialnej funkcji bazowej (RBF).
+
+W przypadku problemów regresji, **SVM** ma za zadanie znaleźć funkcję, która jak najdokładniej odwzorowuje dane treningowe. W tym przypadku, model SVM szuka hiperpłaszczyzny lub zbióru hiperpłaszczyzn, które minimalizują błąd predykcji.
+
+**Model SVM** jest szeroko stosowany w różnych dziedzinach, takich jak rozpoznawanie obrazów, analiza tekstu, bioinformatyka i finanse. Jego zaletami są skuteczność w obszarze danych o dużej wymiarowości oraz odporność na overfitting (nadmierną dopasowanie do danych treningowych).
+
+```{r}
+
+model.svm <- svm(is_canceled~.,data = data.ucz.features)
+
+
+pred.svm <- predict(model.svm, data.test, type = 'prob')
+pred.svm.class <- predict(model.svm,data.test)
+```
+
+```{r}
+
+x5 <- confusionMatrix(pred.svm.class,data.test$is_canceled, positive = '1')
+
+x5
+
+```
+
+Interpretacja:
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 0: 21857
+
+-   Liczba obserwacji przypisanych do klasy 0 i przewidzianych jako klasa 1: 7089
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 0: 692
+
+-   Liczba obserwacji przypisanych do klasy 1 i przewidzianych jako klasa 1: 6178
+
+Statystyki:
+
+-   Accuracy (Dokładność): Model osiągnął dokładność na poziomie 0.7828, co oznacza, że około 78% przewidywań było poprawnych. Jednak należy zauważyć, że dokładność nie jest jedynym wskaźnikiem, który powinien być brany pod uwagę przy ocenie modelu.
+
+-   Kappa: Wartość współczynnika Kappa wynosi 0.4829, co wskazuje na umiarkowaną zgodność między przewidywaniami modelu a prawdziwymi etykietami. Wartości Kappa w przedziale od 0,4 do 0,6 sugerują umiarkowaną zgodność.
+
+-   Sensitivity (Czułość): Czułość modelu wynosi 0.4657, co oznacza, że tylko około 47% przypadków należących do klasy 1 zostało poprawnie przewidzianych. Wysoka wartość czułości jest istotna, gdy istnieje potrzeba skutecznej identyfikacji przypadków klasy 1.
+
+-   Specificity (Specyficzność): Specyficzność wynosi 0.9693, co oznacza, że model poprawnie przewidział około 97% przypadków należących do klasy 0. Wysoka wartość specyficzności jest istotna, gdy istnieje potrzeba dokładnego rozpoznania przypadków klasy 0.
+
+-   Pos Pred Value (Pozytywna wartość predykcyjna): Wartość pozytywnej wartości predykcyjnej wynosi 0.8993, co oznacza, że około 90% przypadków przewidzianych jako pozytywne jest rzeczywiście pozytywnych. Jest to istotne przy ocenie skuteczności modelu w przewidywaniu prawdziwych przypadków klasy 1.
+
+-   Neg Pred Value (Negatywna wartość predykcyjna): Wartość negatywnej wartości predykcyjnej wynosi 0.7551, co oznacza, że około 76% przypadków przewidzianych jako negatywne jest rzeczywiście negatywnych. Jest to istotne przy ocenie zdolności modelu do prawidłowego wykluczania przypadków klasy 1.
+
+-   Balanced Accuracy (Zbalansowana dokładność): Zbalansowana dokładność wynosi 0.7175, co jest średnią z czułości i specyficzności. Wartość ta wskazuje na ogólną skuteczność modelu w klasyfikacji obserwacji z obu klas.
+
+Podsumowując, wyniki modelu SVM na tym zbiorze danych sugerują umiarkowaną skuteczność w przewidywaniu rezerwacji hotelowych. Model posiada pewną zdolność do identyfikacji przypadków klasy 1, ale istnieje również znaczna liczba fałszywie pozytywnych przewidywań. W celu poprawy wyników możliwe jest dostosowanie parametrów modelu lub zastosowanie innych metod klasyfikacji.
+
+### Model `naiwny Bayes'a`
+
+**Model naiwny Bayes'a** jest prostym, ale efektywnym algorytmem używanym w statystyce i uczeniu maszynowym do klasyfikacji. Opiera się na *twierdzeniu Bayesa* i zakłada niezależność wszystkich cech (predyktorów) w stosunku do siebie, co oznacza, że prawdopodobieństwo wystąpienia danej klasy jest obliczane na podstawie prawdopodobieństw warunkowych poszczególnych cech.
+
+**Definicja:** Model naiwny Bayes'a jest probabilistycznym klasyfikatorem, który wykorzystuje twierdzenie Bayesa do oszacowania prawdopodobieństwa przynależności danego obiektu do określonej klasy. Model zakłada niezależność cech i estymuje prawdopodobieństwa warunkowe dla każdej klasy, na podstawie wystąpienia poszczególnych cech w zbiorze treningowym.
+
+Model ten używa prostego wzoru Bayesa, który wygląda następująco: *P(y\|x1, x2, \..., xn) = P(y) \* P(x1\|y) \* P(x2\|y) \* \... \* P(xn\|y) / P(x1, x2, \..., xn)*
+
+*Gdzie:*
+
+-   *P(y\|x1, x2, \..., xn) oznacza prawdopodobieństwo wystąpienia klasy y, przy założeniu wystąpienia cech x1, x2, \..., xn.*
+
+-   *P(y) to prawdopodobieństwo a priori klasy y.*
+
+-   *P(x1\|y), P(x2\|y), \..., P(xn\|y) to prawdopodobieństwa warunkowe cech x1, x2, \..., xn dla klasy y.*
+
+-   *P(x1, x2, \..., xn) to prawdopodobieństwo marginalne wystąpienia cech x1, x2, \..., xn.*
+
+**Model naiwny Bayes'a** jest nazywany "naiwnym", ponieważ zakłada niezależność cech, co nie zawsze jest prawdziwe w rzeczywistych danych. Mimo to, model ten jest często używany ze względu na swoją prostotę i dobre osiągi w wielu zastosowaniach, szczególnie w analizie tekstu, klasyfikacji e-maili jako spam lub nie-spam, rozpoznawaniu języka, itp.
+
+```{r}
+
+model.nb <- naiveBayes(is_canceled~.,data = data.ucz.features)
+
+
+pred.nb <- predict(model.nb, data.test, type = 'raw')
+pred.nb.class <- predict(model.nb,data.test)
+
+
+
+
+x6 <- confusionMatrix(pred.nb.class, data.test$is_canceled, positive = '1')
+
+x6
+```
+
+1.  Accuracy (Dokładność): Model osiągnął dokładność na poziomie 0.7828, co oznacza, że około 78% przewidywań było poprawnych. Jednak należy zauważyć, że dokładność nie jest jedynym wskaźnikiem, który powinien być brany pod uwagę przy ocenie modelu.
+
+2.  Kappa: Wartość współczynnika Kappa wynosi 0.4829, co wskazuje na umiarkowaną zgodność między przewidywaniami modelu a prawdziwymi etykietami. Jednak wartości Kappa w przedziale od 0,4 do 0,6 sugerują umiarkowaną zgodność.
+
+3.  Sensitivity (Czułość): Czułość modelu wynosi 0.4657, co oznacza, że tylko około 47% przypadków należących do klasy 1 zostało poprawnie przewidzianych. Wysoka wartość czułości jest ważna, gdy istnieje potrzeba skutecznej identyfikacji przypadków klasy 1.
+
+4.  Specificity (Specyficzność): Specyficzność wynosi 0.9693, co oznacza, że model poprawnie przewidział około 97% przypadków należących do klasy 0. Wysoka wartość specyficzności jest ważna, gdy istnieje potrzeba dokładnego rozpoznania przypadków klasy 0.
+
+5.  Pos Pred Value (Pozytywna wartość predykcyjna): Wartość pozytywnej wartości predykcyjnej wynosi 0.8993, co oznacza, że około 90% przypadków przewidzianych jako pozytywne jest rzeczywiście pozytywnych. Jest to wskaźnik istotny w przypadku oceny skuteczności modelu w przewidywaniu prawdziwych przypadków klasy 1.
+
+6.  Neg Pred Value (Negatywna wartość predykcyjna): Wartość negatywnej wartości predykcyjnej wynosi 0.7551, co oznacza, że około 76% przypadków przewidzianych jako negatywne jest rzeczywiście negatywnych. Jest to istotne przy ocenie zdolności modelu do prawidłowego wykluczania przypadków klasy 1.
+
+7.  Mcnemar's Test P-Value (Wartość P testu McNemara): Wartość P dla testu statystycznego Mcnemara jest mniejsza niż 2.2e-16, co wskazuje na istotne statystycznie różnice między dwoma klasyfikatorami.
+
+Podsumowując, wyniki modelu Bayesa na tym zbiorze danych sugerują umiarkowaną skuteczność w przewidywaniu rezerwacji hotelowych. Model wykazuje pewną zdolność do identyfikacji przypadków klasy 1, ale istnieje również duża liczba fałszywie pozytywnych przewidywań. Może być konieczne dalsze dostosowanie modelu lub zastosowanie innych metod klasyfikacji w celu poprawy wyników.
+
+## Porównanie modeli
+
+```{r}
+
+library(ROCR)
+
+test1 <- prediction(pred.rpart[,2],data.test$is_canceled)
+test2 <- prediction(pred.nb[,2],data.test$is_canceled)
+test3 <- prediction(pred.knn[,2],data.test$is_canceled)
+test4 <- prediction(pred.rf[,2],data.test$is_canceled)
+test5 <- prediction(pred.xgboost[,2],data.test$is_canceled)
+# test6 <- prediction(pred.svm[,2],data.test$is_canceled)
+
+perf <- performance(test1, 'tpr','fpr')
+perf2 <- performance(test2, 'tpr','fpr')
+perf3 <- performance(test3, 'tpr','fpr')
+perf4 <- performance(test4, 'tpr','fpr')
+perf5 <- performance(test5, 'tpr','fpr')
+
+
+plot(perf,col = 'blue')
+plot(perf2,col = 'green', add = T)
+plot(perf3, add= T, col = 'magenta')
+plot(perf4, add=T, col ='orange')
+plot(perf5, add=T, col ='brown')
+
+legend("topright",legend = c('RPART','NB','KNN','RF','XGBOOST'), col = c('blue','green','magenta','orange','brown'), lwd = 3,cex = 0.6)
+
+```
+
+## **Zestawienie wyników**
+
+```{r}
+nazwa_modelu <- c("drzewo decyzyjne", "RandomForest", "KNN", "XGBOOST", "SVM", "Naiwny Bayes'a")
+accuracy <- c(0.7676, 0.7827, 0.7509, 0.8096, 0.7828, 0.4523)
+kappa <- c(0.4292, 0.4746, 0.4529, 0.5708, 0.4829, 0.0942)
+sensitivity <- c(0.3777, 0.4317, 0.6056, 0.6242, 0.4657, 0.9804)
+specificity <- c(0.9969, 0, 0.9892, 0.8364, 0.9187, 0.9693)
+
+# Tworzenie tabeli
+tabela <- data.frame(Nazwa_Modelu = nazwa_modelu, Accuracy = accuracy, Kappa = kappa, Sensitivity = sensitivity, Specificity = specificity)
+
+# Wyświetlanie tabeli
+print(tabela)
+```
+
+Podsumowując, różne modele mają różne wyniki i charakteryzują się różnymi właściwościami predykcyjnymi. Model **`XGBOOST`** osiągnął najwyższą dokładność i wartość Kappa, co sugeruje, że jest on najskuteczniejszy w przewidywaniu rezerwacji hotelowych na podstawie dostępnych danych. Modele SVM, RandomForest i kNN również osiągnęły dobre wyniki. Natomiast model naiwny Bayes'a uzyskał znacznie niższą dokładność i wartość Kappa, co sugeruje, że nie jest on najlepszym modelem dla tych danych. Wartości czułości i swoistości również różnią się między modelami, co oznacza, że różne modele mają różne zdolności do prawidłowego identyfikowania przypadków klasy 1 i klasy 0.
